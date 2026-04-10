@@ -1,123 +1,80 @@
+"""Parsing de contenus cours (PDF/DOCX/TXT) + résumé optionnel via Groq."""
+
+from __future__ import annotations
+
+import io
+import os
+import re
+
 import fitz
 from docx import Document
-import io
-import re
-import os
 from dotenv import load_dotenv
 from groq import Groq
 
-# ======================
-# ENV SETUP
-# ======================
 load_dotenv()
-
-API_KEY = os.getenv("GROQ_API_KEY")
-
-if not API_KEY:
-    raise ValueError("❌ GROQ_API_KEY manquante dans .env")
-
-client = Groq(api_key=API_KEY)
 
 MODEL = "llama-3.1-8b-instant"
 
 
-# ======================
-# PDF EXTRACTION
-# ======================
+def _get_client() -> Groq:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY manquante")
+    return Groq(api_key=api_key)
+
+
 def extract_pdf(file_bytes: bytes) -> str:
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-
     text = "\n".join(page.get_text() for page in doc)
-
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-
-    return text
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-# ======================
-# DOCX EXTRACTION
-# ======================
 def extract_docx(file_bytes: bytes) -> str:
-    file_stream = io.BytesIO(file_bytes)
-    doc = Document(file_stream)
-
-    return "\n".join(
-        p.text.strip()
-        for p in doc.paragraphs
-        if p.text.strip()
-    )
+    stream = io.BytesIO(file_bytes)
+    doc = Document(stream)
+    return "\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
 
 
-# ======================
-# AUTO DETECTION
-# ======================
-def detect_and_extract(file_bytes: bytes, content_type: str) -> str:
+def detect_and_extract(file_bytes: bytes, content_type: str | None) -> str:
+    normalized = (content_type or "").lower()
 
-    content_type = content_type.lower()
-
-    if "pdf" in content_type:
+    if "pdf" in normalized:
         text = extract_pdf(file_bytes)
-
-        # amélioration: check intelligent
-        if len(text.split()) < 30:
-            raise ValueError("❌ PDF probablement scanné ou vide")
-
+        if len(text.split()) < 10:
+            raise ValueError("PDF probablement vide ou scanné")
         return text
 
-    elif "docx" in content_type or "word" in content_type:
+    if "docx" in normalized or "word" in normalized:
         return extract_docx(file_bytes)
 
-    else:
-        return file_bytes.decode("utf-8", errors="ignore")
+    return file_bytes.decode("utf-8", errors="ignore").strip()
 
 
-# ======================
-# AI SUMMARY (GROQ - PRO)
-# ======================
 def summarize_course(text: str) -> str:
-
     if not text or len(text.strip()) < 20:
-        return "❌ Texte vide ou invalide"
+        raise ValueError("Texte vide ou invalide")
 
-    text = text[:8000]
-
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Tu es un expert en pédagogie et synthèse de cours. "
-                        "Tu dois être clair, structuré et concis."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"""
-Résume ce cours de manière ULTRA CLAIRE.
+    prompt = f"""
+Résume ce cours de manière claire et concise.
 
 FORMAT OBLIGATOIRE :
-
 CONCEPTS CLÉS :
-- concept : définition simple
+- concept : définition
 
 POINTS IMPORTANTS :
-- point court
-
-RELATIONS ENTRE CONCEPTS :
-- liens logiques entre idées
+- point
 
 COURS :
-{text}
+{text[:8000]}
 """
-                }
-            ],
-            temperature=0.3,
-            max_tokens=700
-        )
 
-        return response.choices[0].message.content
-
-    except Exception as e:
-        return f"❌ Erreur Groq API: {str(e)}"
+    response = _get_client().chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "Tu es un assistant pédagogique précis."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=700,
+    )
+    return response.choices[0].message.content or ""
