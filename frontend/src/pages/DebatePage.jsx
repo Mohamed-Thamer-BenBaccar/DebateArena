@@ -50,21 +50,55 @@ export default function DebatePage() {
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let fullReply = ''
+      let buffer = ''
+      let ended = false
 
-      while (true) {
+      while (!ended) {
         const { done, value } = await reader.read()
         if (done) break
-        const token = decoder.decode(value)
-        fullReply += token
-        setMessages(prev => [
-          ...prev.slice(0, -1),
-          { role: 'ai', content: prev.at(-1).content + token }
-        ])
+
+        buffer += decoder.decode(value, { stream: true })
+        const events = buffer.split('\n\n')
+        buffer = events.pop() || ''
+
+        for (const rawEvent of events) {
+          const lines = rawEvent.split('\n')
+          const eventLine = lines.find(line => line.startsWith('event:'))
+          const dataLine = lines.find(line => line.startsWith('data:'))
+          if (!eventLine || !dataLine) continue
+
+          const eventType = eventLine.replace('event:', '').trim()
+          const dataPayload = dataLine.replace('data:', '').trim()
+
+          if (eventType === 'token') {
+            try {
+              const parsed = JSON.parse(dataPayload)
+              const token = parsed?.token || ''
+              fullReply += token
+              setMessages(prev => [
+                ...prev.slice(0, -1),
+                { role: 'ai', content: prev.at(-1).content + token }
+              ])
+            } catch {
+              // Ignore malformed token payload
+            }
+          }
+
+          if (eventType === 'done') {
+            ended = true
+            break
+          }
+
+          if (eventType === 'error') {
+            throw new Error('Erreur stream SSE')
+          }
+        }
       }
 
       const newScore = extractScore(fullReply)
       if (newScore !== null) setScore(newScore)
 
+    // eslint-disable-next-line no-unused-vars
     } catch (err) {
       setMessages(prev => [
         ...prev.slice(0, -1),
